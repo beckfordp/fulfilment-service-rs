@@ -6,10 +6,12 @@
 //! server that stops by itself stops the service, non-zero (Scala
 //! `KafkaConsumers.watched`).
 
+use fulfilment_service::clients::{self, Orders};
 use fulfilment_service::config::{self, Config};
-use fulfilment_service::store::PgExamples;
-use fulfilment_service::{consumers, lifecycle};
-use fulfilment_service::{db, server};
+use fulfilment_service::domain::OperatorAuth;
+use fulfilment_service::server::{self, AppState};
+use fulfilment_service::store::PgTasks;
+use fulfilment_service::{consumers, db, lifecycle};
 use kafka_client::supervised::ConsumerTelemetry;
 use service_basics::{environment, runtime, shutdown};
 use std::process::ExitCode;
@@ -75,26 +77,39 @@ async fn serve(config: &Config, tracer: SdkTracer) -> ExitCode {
         &[("port", &config.port.to_string())],
         "fulfilment-service starting",
     );
-    let store = PgExamples::new(pool);
+    let metrics = Metrics::new(&config.service_name);
+    let orders = match clients::resilient(tracer.clone(), &metrics) {
+        Ok(client) => Orders::new(&config.order_url, client),
+        Err(error) => {
+            eprintln!("{SERVICE}: can't build the HTTP client: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let store = PgTasks::new(pool);
+    let state = AppState {
+        store: store.clone(),
+        auth: OperatorAuth::new(&config.operator_token, &config.operator_id),
+        logger: logger.clone(),
+    };
     let telemetry = ConsumerTelemetry {
         tracer,
         logger: logger.clone(),
-        metrics: Metrics::new(&config.service_name),
+        metrics,
     };
     let (stop, stopped) = watch::channel(false);
     let server = {
-        let (port, mut stopped) = (config.port, stopped.clone());
+        let (port, simulation, mut stopped) =
+            (config.port, config.simulation_enabled, stopped.clone());
         async move {
             let until_stopped = async move {
                 let _ = stopped.wait_for(|stop| *stop).await;
             };
-            server::run(port, store, until_stopped).await
+            server::run(port, state, simulation, until_stopped).await
         }
     };
     let consumers = {
         let bootstrap = config.kafka_bootstrap.clone();
-        let logger = logger.clone();
-        async move { consumers::run(&bootstrap, logger, telemetry, stopped).await }
+        async move { consumers::run(&bootstrap, store, orders, telemetry, stopped).await }
     };
     let signal = shutdown::signal(SERVICE);
     if lifecycle::run_until_stopped(server, consumers, signal, stop, &logger).await {

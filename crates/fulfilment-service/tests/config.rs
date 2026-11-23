@@ -30,6 +30,10 @@ fn defaults() {
                 password: "fulfilment".to_owned(),
             },
             kafka_bootstrap: "localhost:9092".to_owned(),
+            order_url: "http://localhost:8083".to_owned(),
+            simulation_enabled: false,
+            operator_token: "dev-operator-token".to_owned(),
+            operator_id: "dev-operator".to_owned(),
             tracing: TracingConfig {
                 otlp_endpoint: None,
                 sampling_ratio: 1.0,
@@ -49,7 +53,10 @@ fn every_variable_overrides_its_default() {
         ("POSTGRES_USER", "u"),
         ("POSTGRES_PASSWORD", "p"),
         ("KAFKA_BOOTSTRAP_SERVERS", "127.0.0.1:19092"),
-        ("REDIS_URI", "redis://127.0.0.1:16379"),
+        ("ORDER_SERVICE_URL", "http://127.0.0.1:18083"),
+        ("FULFILMENT_SIMULATION_ENABLED", "true"),
+        ("OPERATOR_TOKEN", "t"),
+        ("OPERATOR_ID", "op"),
         ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318"),
         ("OTEL_TRACES_SAMPLER_ARG", "0.25"),
     ]))
@@ -59,6 +66,25 @@ fn every_variable_overrides_its_default() {
     assert_eq!(config.postgres.port, 15432);
     assert_eq!(config.kafka_bootstrap, "127.0.0.1:19092");
     assert_eq!(config.tracing.sampling_ratio, 0.25);
+    assert_eq!(config.order_url, "http://127.0.0.1:18083");
+    assert!(config.simulation_enabled);
+    assert_eq!(
+        (config.operator_token.as_str(), config.operator_id.as_str()),
+        ("t", "op")
+    );
+}
+
+#[test]
+fn the_simulation_switch_reads_hocon_booleans() {
+    for (raw, want) in [
+        ("on", true),
+        ("yes", true),
+        (" false ", false),
+        ("off", false),
+    ] {
+        let config = from_env(&env(&[("FULFILMENT_SIMULATION_ENABLED", raw)])).unwrap();
+        assert_eq!(config.simulation_enabled, want, "{raw}");
+    }
 }
 
 #[test]
@@ -66,9 +92,13 @@ fn every_problem_is_reported() {
     let error = from_env(&env(&[
         ("FULFILMENT_SERVICE_PORT", "http"),
         ("POSTGRES_PORT", "x"),
+        ("FULFILMENT_SIMULATION_ENABLED", "maybe"),
+        ("OPERATOR_ID", " "),
     ]))
     .unwrap_err();
     let text = error.to_string();
     assert!(text.contains("FULFILMENT_SERVICE_PORT"), "{text}");
     assert!(text.contains("POSTGRES_PORT"), "{text}");
+    assert!(text.contains("FULFILMENT_SIMULATION_ENABLED"), "{text}");
+    assert!(text.contains("operator-id"), "{text}");
 }
